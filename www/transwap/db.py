@@ -1,10 +1,16 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 __author__ = 'guti'
+
+'''
+Database base module.
+'''
 
 import threading
 import logging
 import functools
 import time
+import traceback
 
 
 class _Engine(object):
@@ -103,10 +109,11 @@ class _ConnectionContext(object):
             self.is_cleanable = True
         return self
 
-    # TODO: using the rest parameter logging the exit information
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _db_ctx
         if self.is_cleanable:
+            if exc_type is not None:
+                logging.warning(''.join(traceback.format_exception(exc_type, exc_val, exc_tb)))
             _db_ctx.clean()
 
 
@@ -131,7 +138,6 @@ class _TransactionContext(object):
         _db_ctx.transactions += 1
         return self
 
-    # TODO: using the rest parameter logging the exit information
     def __exit__(self, exc_type, exc_val, exc_tb):
         global _db_ctx
         _db_ctx.transactions -= 1
@@ -144,6 +150,8 @@ class _TransactionContext(object):
                     self.rollback()
         finally:
             if self.is_closable:
+                if exc_type is not None:
+                    logging.warning(''.join(traceback.format_exception(exc_type, exc_val, exc_tb)))
                 _db_ctx.clean()
 
     @staticmethod
@@ -189,9 +197,9 @@ class MultiColumnsError(DBError):
 
 class Dict(dict):
     """
-    Dict support dict_object.key operation
+    Dict support dict_object.key operation.
 
-    used to simplify getting item from dict.
+    Simplify getting item from dict.
 
     >>> d1 = Dict()
     >>> d1['x'] = 100
@@ -280,20 +288,20 @@ def transaction():
 
     >>> def update_profile(t_id, name, rollback):
     ...     u = dict(id=t_id, name=name, email='%s@test.org' % name, password=name, last_modified=time.time())
-    ...     insert('t_user', **u)
-    ...     update('update t_user set password=%s where id=%s', name.upper(), t_id)
+    ...     insert('testuser', **u)
+    ...     update('update testuser set password=%s where id=%s', name.upper(), t_id)
     ...     if rollback:
     ...         raise StandardError('will cause rollback...')
     >>> with transaction():
     ...     update_profile(900301, 'Python', False)
-    >>> select_one('select * from t_user where id=%s', 900301).name
+    >>> select_one('select * from testuser where id=%s', 900301).name
     u'Python'
     >>> with transaction():
     ...     update_profile(900302, 'Ruby', True)
     Traceback (most recent call last):
       ...
     StandardError: will cause rollback...
-    >>> select('select * from t_user where id=%s', 900302)
+    >>> select('select * from testuser where id=%s', 900302)
     []
     """
     return _TransactionContext()
@@ -354,6 +362,7 @@ def _update(sql, *args):
     """
     global _db_ctx
     cursor = None
+    logging.info('SQL: %s, ARGS: %s' % (sql, args))
     try:
         cursor = _db_ctx.connection.cursor()
         cursor.execute(sql, args)
@@ -399,19 +408,19 @@ def select_one(sql, *args):
 
     >>> u1 = dict(id=100, name='Alice', email='alice@test.org', password='ABC-12345', last_modified=time.time())
     >>> u2 = dict(id=101, name='Sarah', email='sarah@test.org', password='ABC-12345', last_modified=time.time())
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     1
-    >>> insert('t_user', **u2)
+    >>> insert('testuser', **u2)
     1
-    >>> u = select_one('select * from t_user where id=%s', 100)
+    >>> u = select_one('select * from testuser where id=%s and name=%s', 100, 'Alice')
     >>> u.name
     u'Alice'
-    >>> select_one('select * from t_user where email=%s', 'abc@email.com')
-    >>> u2 = select_one('select * from t_user where password=%s order by email', 'ABC-12345')
+    >>> select_one('select * from testuser where email=%s', 'abc@email.com')
+    >>> u2 = select_one('select * from testuser where password=%s order by email', 'ABC-12345')
     >>> u2.name
     u'Alice'
     """
-    return _select(sql, True, args)
+    return _select(sql, True, *args)
 
 
 @with_connection
@@ -419,22 +428,22 @@ def select_int(sql, *args):
     """
     Execute select SQL and expected one int and only one int result.
 
-    >>> n = update('delete from t_user')
+    >>> n = update('delete from testuser')
     >>> u1 = dict(id=96900, name='Ada', email='ada@test.org', password='A-12345', last_modified=time.time())
     >>> u2 = dict(id=96901, name='Adam', email='adam@test.org', password='A-12345', last_modified=time.time())
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     1
-    >>> insert('t_user', **u2)
+    >>> insert('testuser', **u2)
     1
-    >>> select_int('select count(*) from t_user')
+    >>> select_int('select count(*) from testuser')
     2L
-    >>> select_int('select count(*) from t_user where email=%s', 'ada@test.org')
+    >>> select_int('select count(*) from testuser where email=%s', 'ada@test.org')
     1L
-    >>> select_int('select count(*) from t_user where email=%s', 'notexist@test.org')
+    >>> select_int('select count(*) from testuser where email=%s', 'notexist@test.org')
     0L
-    >>> select_int('select id from t_user where email=%s', 'ada@test.org')
+    >>> select_int('select id from testuser where email=%s', 'ada@test.org')
     96900
-    >>> select_int('select id, name from t_user where email=%s', 'ada@test.org')
+    >>> select_int('select id, name from testuser where email=%s', 'ada@test.org')
     Traceback (most recent call last):
         ...
     MultiColumnsError: Expect only one column.
@@ -452,17 +461,17 @@ def select(sql, *args):
 
     >>> u1 = dict(id=200, name='Wall.E', email='wall.e@test.org', password='back-to-earth', last_modified=time.time())
     >>> u2 = dict(id=201, name='Eva', email='eva@test.org', password='back-to-earth', last_modified=time.time())
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     1
-    >>> insert('t_user', **u2)
+    >>> insert('testuser', **u2)
     1
-    >>> L = select('select * from t_user where id=%s', 900900900)
+    >>> L = select('select * from testuser where id=%s', 900900900)
     >>> L
     []
-    >>> L = select('select * from t_user where id=%s', 200)
+    >>> L = select('select * from testuser where id=%s', 200)
     >>> L[0].email
     u'wall.e@test.org'
-    >>> L = select('select * from t_user where password=%s order by id desc', 'back-to-earth')
+    >>> L = select('select * from testuser where password=%s order by id desc', 'back-to-earth')
     >>> L[0].name
     u'Eva'
     >>> L[1].name
@@ -477,21 +486,21 @@ def update(sql, *args):
     Execute update SQL.
 
     >>> u1 = dict(id=1000, name='Michael', email='michael@test.org', password='123456', last_modified=time.time())
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     1
-    >>> u2 = select_one('select * from t_user where id=%s', 1000)
+    >>> u2 = select_one('select * from testuser where id=%s', 1000)
     >>> u2.email
     u'michael@test.org'
     >>> u2.password
     u'123456'
-    >>> update('update t_user set email=%s, password=%s where id=%s', 'michael@example.org', '654321', 1000)
+    >>> update('update testuser set email=%s, password=%s where id=%s', 'michael@example.org', '654321', 1000)
     1
-    >>> u3 = select_one('select * from t_user where id=%s', 1000)
+    >>> u3 = select_one('select * from testuser where id=%s', 1000)
     >>> u3.email
     u'michael@example.org'
     >>> u3.password
     u'654321'
-    >>> update('update t_user set password=%s where id=%s or id=%s', '***', 123, 456)
+    >>> update('update testuser set password=%s where id=%s or id=%s', '***', 123, 456)
     0
     """
     return _update(sql, *args)
@@ -506,31 +515,31 @@ def insert(table, **kwargs):
     :return: int number of raw number.
 
     >>> u1 = dict(id=2000, name='Bob', email='bob@test.org', password='cool_word', last_modified=time.time())
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     1
-    >>> u2 = select_one('select * from t_user where id=%s', 2000)
+    >>> u2 = select_one('select * from testuser where id=%s', 2000)
     >>> u2.name
     u'Bob'
-    >>> insert('t_user', **u1)
+    >>> insert('testuser', **u1)
     Traceback (most recent call last):
       ...
-    IntegrityError: duplicate key value violates unique constraint "t_user_pkey"
+    IntegrityError: duplicate key value violates unique constraint "testuser_pkey"
     DETAIL:  Key (id)=(2000) already exists.
     <BLANKLINE>
     """
     cols, args = zip(*kwargs.iteritems())
-    sql = 'insert into "%s" (%s) values (%s)' % (table, ','.join(['"%s"' % col for col in cols]),
-                                                 (','.join(['%s' for _ in range(len(cols))])))
+    sql = 'insert into %s (%s) values (%s)' % (table, ','.join(['"%s"' % col for col in cols]),
+                                               (','.join(['%s' for _ in range(len(cols))])))
     r = _update(sql, *args)
     return r
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     # TODO: should be modified to your own test database
-    create_engine('test-user', 'test_password', 'test_database')
-    update('drop table if exists "t_user"')
-    update('create table t_user (id int primary key, name text, email text, password text, last_modified real)')
+    create_engine('test_user', 'test_pw', 'test_db')
+    update('drop table if exists testuser')
+    update('create table testuser (id int primary key, name text, email text, password text, last_modified real)')
     # delete the test data if needed
-    # update('drop table if exists "t_user"')
+    # update('drop table if exists "testuser"')
     import doctest
     doctest.testmod()

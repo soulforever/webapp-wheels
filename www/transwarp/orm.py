@@ -3,7 +3,7 @@
 __author__ = 'guti'
 
 '''
-Database object relation mapping module
+Database object relation mapping module.
 '''
 
 import time
@@ -199,7 +199,7 @@ class Model(dict):
         """
         Find by where clause and return list.
         """
-        result = db.select('select * from %s where %s' % (cls.__name__, where), *args)
+        result = db.select('select * from %s where %s' % (cls.__table__, where), *args)
         return [cls(**r) for r in result]
 
     @classmethod

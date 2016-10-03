@@ -11,6 +11,7 @@ import logging
 import functools
 import time
 import traceback
+import uuid
 
 
 class _Engine(object):
@@ -244,6 +245,35 @@ class Dict(dict):
         self[key] = value
 
 
+def next_id(t=None):
+    """
+    Get next id for database primary keys.
+
+    :param t: timestamp, default is None and use time.time().
+    :return: next id as 50-char string.
+
+    >>> next_id() != next_id()
+    True
+    """
+    if t is None:
+        t = time.time()
+    return '%015d%s000' % (int(t * 1000), uuid.uuid4().hex)
+
+
+def _profiling(start, sql=''):
+    """
+    Profile the database executing sql.
+
+    :param start: start time.
+    :param sql: sql str.
+    """
+    t = time.time() - start
+    if t > 0.1:
+        logging.warning('[PROFILING] [DB] %s: %s' % (t, sql))
+    else:
+        logging.info('[PROFILING] [DB] %s: %s' % (t, sql))
+
+
 def connection():
     """
     Get database connection context object
@@ -272,7 +302,10 @@ def with_connection(func):
     @functools.wraps(func)
     def _wrapper(*args, **kwargs):
         with _ConnectionContext():
-            return func(*args, **kwargs)
+            _start = time.time()
+            result = func(*args, **kwargs)
+            _profiling(_start)
+            return result
     return _wrapper
 
 
@@ -322,8 +355,37 @@ def with_transaction(func):
     @functools.wraps(func)
     def _wrapper(*args, **kwargs):
         with _TransactionContext():
-            return func(*args, **kwargs)
+            _start = time.time()
+            result = func(*args, **kwargs)
+            _profiling(_start)
+            return result
     return _wrapper
+
+# global engine object
+engine = None
+
+# global database context object
+_db_ctx = _DbContext()
+
+
+def create_engine(user, password, database, host='127.0.0.1', port=5432, **kwargs):
+    """
+    Create the engine connect the database.
+    Use postgreSQL database.
+    """
+    import psycopg2
+    global engine
+    # set psycopg2 module select unicode result
+    psycopg2.extensions.register_type(psycopg2.extensions.UNICODE, None)
+    if engine is not None:
+        raise DBError('Engine is already initialized.')
+    params = dict(user=user, password=password, database=database, host=host, port=port)
+    defaults = dict(client_encoding='UTF8', connection_factory=None, cursor_factory=None, async=False)
+    for k, v in defaults.items():
+        params[k] = kwargs.pop(k, v)
+    params.update(kwargs)
+    engine = _Engine(lambda: psycopg2.connect(**params))
+    logging.info('Initialize postgreSQL engine <%s>' % hex(id(engine)))
 
 
 def _select(sql, first, *args):
@@ -373,32 +435,6 @@ def _update(sql, *args):
     finally:
         if cursor:
             cursor.close()
-
-# global engine object
-engine = None
-
-# global database context object
-_db_ctx = _DbContext()
-
-
-def create_engine(user, password, database, host='127.0.0.1', port=5432, **kwargs):
-    """
-    Create the engine connect the database.
-    Use postgreSQL database.
-    """
-    import psycopg2
-    global engine
-    # set psycopg2 module select unicode result
-    psycopg2.extensions.register_type(psycopg2.extensions.UNICODE, None)
-    if engine is not None:
-        raise DBError('Engine is already initialized.')
-    params = dict(user=user, password=password, database=database, host=host, port=port)
-    defaults = dict(client_encoding='UTF8', connection_factory=None, cursor_factory=None, async=False)
-    for k, v in defaults.items():
-        params[k] = kwargs.pop(k, v)
-    params.update(kwargs)
-    engine = _Engine(lambda: psycopg2.connect(**params))
-    logging.info('Initialize postgreSQL engine <%s>' % hex(id(engine)))
 
 
 @with_connection
@@ -532,6 +568,7 @@ def insert(table, **kwargs):
                                                (','.join(['%s' for _ in range(len(cols))])))
     r = _update(sql, *args)
     return r
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)

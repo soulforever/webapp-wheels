@@ -11,7 +11,9 @@ import string
 import mimetypes
 import cgi
 import logging
+import functools
 
+from abc import abstractmethod
 from copy import deepcopy
 from db import Dict
 
@@ -30,6 +32,10 @@ _RE_TZ = re.compile(r'^([\+\-])([0-9]{1,2}):([0-9]{1,2})$')
 _RE_RESPONSE_STATUS = re.compile(r'^\d\d\d( [\w ]+)?$')
 # a compiled regular expression for route.
 _RE_ROUTE = re.compile(r'(:[a-zA-Z_]\w*)')
+# a compiled regular expression for the start of interceptor
+_RE_INTERCEPTOR_STARTS_WITH = re.compile(r'^([^\*\?]+)\*?$')
+# a compiled regular expression for the end of interceptor
+_RE_INTERCEPTOR_ENDS_WITH = re.compile(r'^\*([^\*\?]+)$')
 # all known response status.
 _RESPONSE_STATUSES = {
     # Informational
@@ -198,69 +204,6 @@ class UTC(datetime.tzinfo):
 
 # zero UTC time.
 _UTC_0 = UTC('+00:00')
-
-
-class HttpError(Exception):
-    """
-     HttpError that defines http error code.
-
-    >>> e = HttpError(404)
-    >>> e.status
-    '404 Not Found'
-    >>> e.headers
-    [('X-Powered-By', 'transwarp/1.0')]
-    >>> e.header('Content-Encoding', 'utf-8')
-    >>> e.headers
-    [('X-Powered-By', 'transwarp/1.0'), ('Content-Encoding', 'utf-8')]
-    >>> e
-    404 Not Found
-    >>> print e
-    404 Not Found
-    """
-    def __init__(self, code):
-        """
-        :param code: http response code, like keys in _RESPONSE_STATUSES
-        """
-        super(HttpError, self).__init__()
-        self.status = '%d %s' % (code, _RESPONSE_STATUSES[code])
-        if not hasattr(self, '_headers'):
-            self._headers = [_HEADER_X_POWERED_BY]
-
-    def header(self, name, value):
-        self._headers.append((name, value))
-
-    @property
-    def headers(self):
-        return self._headers
-
-    def __str__(self):
-        return self.status
-
-    __repr__ = __str__
-
-
-class RedirectError(HttpError):
-    """
-    RedirectError that defines http redirect code.
-
-    >>> e = RedirectError(302, 'http://www.apple.com/')
-    >>> e.status
-    '302 Found'
-    >>> e.location
-    'http://www.apple.com/'
-    """
-    def __init__(self, code, location):
-        """
-        :param code: response code.
-        :param location: response location url
-        """
-        super(RedirectError, self).__init__(code)
-        self.location = location
-
-    def __str__(self):
-        return '%s, %s' % (self.status, self.location)
-
-    __repr__ = __str__
 
 
 def bad_request():
@@ -476,6 +419,225 @@ def post(path):
     return _decorator
 
 
+def view(path):
+    """
+    A view decorator that render a view by dict.
+
+    >>> @view('test/view.html')
+    ... def hello():
+    ...     return dict(name='Bob')
+    >>> t = hello()
+    >>> isinstance(t, Template)
+    True
+    >>> t.template_name
+    'test/view.html'
+    >>> @view('test/view.html')
+    ... def hello2():
+    ...     return ['a list']
+    >>> t = hello2()
+    Traceback (most recent call last):
+      ...
+    ValueError: Expect return a dict when using @view() decorator.
+    """
+    def _decorator(func):
+        @functools.wraps(func)
+        def _wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if isinstance(result, dict):
+                logging.info('Return template.')
+                return Template(path, **result)
+            raise ValueError('Expect return a dict when using @view() decorator.')
+        return _wrapper
+    return _decorator
+
+
+
+
+def _build_pattern_fn(pattern):
+    m = _RE_INTERCEPTOR_STARTS_WITH.match(pattern)
+    if m:
+        return lambda p: p.startswith(m.group(1))
+    m = _RE_INTERCEPTOR_ENDS_WITH.match(pattern)
+    if m:
+        return lambda p: p.endswith(m.group(1))
+    raise ValueError('Invalid pattern definition in interceptor.')
+
+
+def interceptor(pattern='/'):
+    """
+    An @interceptor decorator.
+
+    @interceptor('/admin/')
+    def check_admin(req, resp):
+        pass
+    """
+    def _decorator(func):
+        func.__interceptor__ = _build_pattern_fn(pattern)
+        return func
+    return _decorator
+
+
+def _build_interceptor_fn(func, next_fn):
+    def _wrapper():
+        if func.__interceptor__(context.request.path_info):
+            return func(next_fn)
+        else:
+            return next_fn()
+    return _wrapper
+
+
+def _build_interceptor_chain(last_fn, *interceptors):
+    """
+    Build interceptor chain.
+
+    >>> def target():
+    ...     print 'target'
+    ...     return 123
+    >>> @interceptor('/')
+    ... def f1(next):
+    ...     print 'before f1()'
+    ...     return next()
+    >>> @interceptor('/test/')
+    ... def f2(next):
+    ...     print 'before f2()'
+    ...     try:
+    ...         return next()
+    ...     finally:
+    ...         print 'after f2()'
+    >>> @interceptor('/')
+    ... def f3(next):
+    ...     print 'before f3()'
+    ...     try:
+    ...         return next()
+    ...     finally:
+    ...         print 'after f3()'
+    >>> chain = _build_interceptor_chain(target, f1, f2, f3)
+    >>> context.request = Dict(path_info='/test/abc')
+    >>> chain()
+    before f1()
+    before f2()
+    before f3()
+    target
+    after f3()
+    after f2()
+    123
+    >>> context.request = Dict(path_info='/api/')
+    >>> chain()
+    before f1()
+    before f3()
+    target
+    after f3()
+    123
+    """
+    ic_list = list(interceptors)
+    ic_list.reverse()
+    fn = last_fn
+    for f in ic_list:
+        fn = _build_interceptor_fn(f, fn)
+    return fn
+
+
+def _load_module(module_name):
+    """
+    Load module from name as str.
+
+    >>> m = _load_module('xml')
+    >>> m.__name__
+    'xml'
+    >>> m = _load_module('xml.sax')
+    >>> m.__name__
+    'xml.sax'
+    >>> m = _load_module('xml.sax.handler')
+    >>> m.__name__
+    'xml.sax.handler'
+    """
+    last_dot = module_name.rfind('.')
+    if last_dot == -1:
+        return __import__(module_name, globals(), locals())
+    from_module = module_name[:last_dot]
+    import_module = module_name[last_dot+1:]
+    m = __import__(from_module, globals(), locals(), [import_module])
+    return getattr(m, import_module)
+
+
+def _default_error_handler(e, start_response, is_debug):
+    if isinstance(e, HttpError):
+        logging.info('HttpError: %s' % e.status)
+        headers = e.headers[:]
+        headers.append(('Content-Type', 'text/html'))
+        start_response(e.status, headers)
+        return '<html><body><h1>%s</h1></body></html>' % e.status
+    logging.exception('Exception:')
+    start_response('500 Internal Server Error', [('Content-Type', 'text/html'), _HEADER_X_POWERED_BY])
+    if is_debug:
+        # return _debug()
+        logging.info('Debug...')
+    return '<html><body><h1>500 Internal Server Error</h1><h3>%s</h3></body></html>' % str(e)
+
+
+class HttpError(Exception):
+    """
+     HttpError that defines http error code.
+
+    >>> e = HttpError(404)
+    >>> e.status
+    '404 Not Found'
+    >>> e.headers
+    [('X-Powered-By', 'transwarp/1.0')]
+    >>> e.header('Content-Encoding', 'utf-8')
+    >>> e.headers
+    [('X-Powered-By', 'transwarp/1.0'), ('Content-Encoding', 'utf-8')]
+    >>> e
+    404 Not Found
+    >>> print e
+    404 Not Found
+    """
+    def __init__(self, code):
+        """
+        :param code: http response code, like keys in _RESPONSE_STATUSES
+        """
+        super(HttpError, self).__init__()
+        self.status = '%d %s' % (code, _RESPONSE_STATUSES[code])
+        if not hasattr(self, '_headers'):
+            self._headers = [_HEADER_X_POWERED_BY]
+
+    def header(self, name, value):
+        self._headers.append((name, value))
+
+    @property
+    def headers(self):
+        return self._headers
+
+    def __str__(self):
+        return self.status
+
+    __repr__ = __str__
+
+
+class RedirectError(HttpError):
+    """
+    RedirectError that defines http redirect code.
+
+    >>> e = RedirectError(302, 'http://www.apple.com/')
+    >>> e.status
+    '302 Found'
+    >>> e.location
+    'http://www.apple.com/'
+    """
+    def __init__(self, code, location):
+        """
+        :param code: response code.
+        :param location: response location url
+        """
+        super(RedirectError, self).__init__(code)
+        self.location = location
+
+    def __str__(self):
+        return '%s, %s' % (self.status, self.location)
+
+    __repr__ = __str__
+
+
 class Route(object):
     """
     Route object for record route information
@@ -598,7 +760,7 @@ class Request(object):
     """
     def __init__(self, env):
         # record the environment of the request object.
-        self._env = env
+        self._environ = env
 
     def _parse_input(self):
         def _convert(item):
@@ -607,7 +769,7 @@ class Request(object):
             if item.filename:
                 return MultiPartFile(item)
             return _to_encode(item.value)
-        fs = cgi.FieldStorage(fp=self._env['wsgi.input'], environ=self._env, keep_blank_values=True)
+        fs = cgi.FieldStorage(fp=self._environ['wsgi.input'], environ=self._environ, keep_blank_values=True)
         inputs = dict()
         for key in fs:
             inputs[key] = _convert(fs[key])
@@ -730,7 +892,7 @@ class Request(object):
         >>> r.get_body()
         '<xml><raw/>'
         """
-        fp = self._env['wsgi.input']
+        fp = self._environ['wsgi.input']
         return fp.read()
 
     @property
@@ -742,7 +904,7 @@ class Request(object):
         >>> r.remote_addr
         '192.168.0.100'
         """
-        return self._env.get('REMOTE_ADDR', '0.0.0.0')
+        return self._environ.get('REMOTE_ADDR', '0.0.0.0')
 
     @property
     def document_root(self):
@@ -752,7 +914,7 @@ class Request(object):
         >>> r.document_root
         '/srv/path/to/doc'
         """
-        return self._env.get('DOCUMENT_ROOT', '')
+        return self._environ.get('DOCUMENT_ROOT', '')
 
     @property
     def query_string(self):
@@ -765,7 +927,7 @@ class Request(object):
         >>> r.query_string
         ''
         """
-        return self._env.get('QUERY_STRING', '')
+        return self._environ.get('QUERY_STRING', '')
 
     @property
     def environment(self):
@@ -781,7 +943,7 @@ class Request(object):
         >>> r.environment.get('SERVER_NAME', 'name')
         'name'
         """
-        return self._env
+        return self._environ
 
     @property
     def request_method(self):
@@ -795,7 +957,7 @@ class Request(object):
         >>> r.request_method
         'POST'
         """
-        return self._env['REQUEST_METHOD']
+        return self._environ['REQUEST_METHOD']
 
     # TODO: check _unquote function
     @property
@@ -807,7 +969,7 @@ class Request(object):
         >>> r.path_info
         '/test/a b.html'
         """
-        return urllib.unquote(self._env.get('PATH_INFO', ''))
+        return urllib.unquote(self._environ.get('PATH_INFO', ''))
 
     @property
     def host(self):
@@ -818,12 +980,12 @@ class Request(object):
         >>> r.host
         'localhost:8080'
         """
-        return self._env.get('HTTP_HOST', '')
+        return self._environ.get('HTTP_HOST', '')
 
     def _get_headers(self):
         if not hasattr(self, '_headers'):
             headers = dict()
-            for k, v in self._env.iteritems():
+            for k, v in self._environ.iteritems():
                 if k.startswith('HTTP_'):
                     # convert 'HTTP_ACCEPT_ENCODING' to 'ACCEPT-ENCODING'
                     headers[k[5:].replace('_', '-').upper()] = _to_encode(v)
@@ -869,7 +1031,7 @@ class Request(object):
     def _get_cookies(self):
         if not hasattr(self, '_cookies'):
             cookies = dict()
-            cookie_str = self._env.get('HTTP_COOKIE')
+            cookie_str = self._environ.get('HTTP_COOKIE')
             if cookie_str:
                 for c in cookie_str.split(';'):
                     position = c.find('=')
@@ -914,53 +1076,322 @@ class Response(object):
         self._status = '200 OK'
         self._headers = {'CONTENT-TYPE': 'text/html; charset=utf-8'}
 
-    def set_header(self, key, value):
-        pass
+    @property
+    def headers(self):
+        """
+        Return response headers as [(key1, value1), (key2, value2)...] including cookies.
 
-    def set_cookie(self, key, value, max_age=None, expires=None, path='/'):
-        pass
+        >>> r = Response()
+        >>> r.headers
+        [('Content-Type', 'text/html; charset=utf-8'), ('X-Powered-By', 'transwarp/1.0')]
+        >>> r.set_cookie('s1', 'ok', 3600)
+        >>> r.headers
+        [('Content-Type', 'text/html; charset=utf-8'), ('Set-Cookie', 's1=ok; Max-Age=3600; Path=/; HttpOnly'),\
+ ('X-Powered-By', 'transwarp/1.0')]
+        """
+        header_list = [(_RESPONSE_HEADER_DICT.get(k, k), v) for k, v in self._headers.iteritems()]
+        if hasattr(self, '_cookies'):
+            for v in self._cookies.itervalues():
+                header_list.append(('Set-Cookie', v))
+        header_list.append(_HEADER_X_POWERED_BY)
+        return header_list
+
+    def header(self, name):
+        """
+        Get header by name, case-insensitive.
+
+        >>> r = Response()
+        >>> r.header('content-type')
+        'text/html; charset=utf-8'
+        >>> r.header('CONTENT-type')
+        'text/html; charset=utf-8'
+        >>> r.header('X-Powered-By')
+        """
+        key = name.upper()
+        if key not in _RESPONSE_HEADER_DICT:
+            key = name
+        return self._headers.get(key)
+
+    def del_header(self, name):
+        """
+        Delete header by name and value.
+
+        >>> r = Response()
+        >>> r.header('content-type')
+        'text/html; charset=utf-8'
+        >>> r.del_header('CONTENT-type')
+        >>> r.header('content-type')
+        """
+        key = name.upper()
+        if key not in _RESPONSE_HEADER_DICT:
+            key = name
+        if key in self._headers:
+            del self._headers[key]
+
+    def set_header(self, name, value):
+        """
+        Set header by name and value.
+
+        >>> r = Response()
+        >>> r.header('content-type')
+        'text/html; charset=utf-8'
+        >>> r.set_header('CONTENT-type', 'image/png')
+        >>> r.header('content-TYPE')
+        'image/png'
+        """
+        key = name.upper()
+        if key not in _RESPONSE_HEADER_DICT:
+            key = name
+        self._headers[key] = _to_str(value)
+
+    @property
+    def content_type(self):
+        """
+        Get content type from response. This is a shortcut for header('Content-Type').
+
+        >>> r = Response()
+        >>> r.content_type
+        'text/html; charset=utf-8'
+        >>> r.content_type = 'application/json'
+        >>> r.content_type
+        'application/json'
+        """
+        return self._headers['CONTENT-TYPE']
+
+    @content_type.setter
+    def content_type(self, value):
+        """
+        Set content type for response. This is a shortcut for set_header('Content-Type', value).
+        If value is None, del the content type in headers
+        """
+        if value:
+            self._headers['CONTENT-TYPE'] = value
+        else:
+            self.del_header('CONTENT-TYPE')
+
+    @property
+    def content_len(self):
+        """
+        Get content length. Return None if not set.
+
+        >>> r = Response()
+        >>> r.content_len
+        >>> r.content_len = 100
+        >>> r.content_len
+        '100'
+        """
+        return self.header('CONTENT-LENGTH')
+
+    @content_len.setter
+    def content_len(self, value):
+        """
+        Set content length, the value can be int or str.
+
+        >>> r = Response()
+        >>> r.content_len = '1024'
+        >>> r.content_len
+        '1024'
+        >>> r.content_len = 1024 * 8
+        >>> r.content_len
+        '8192'
+        """
+        self.set_header('CONTENT-LENGTH', value)
+
+    def del_cookie(self, name):
+        """
+        Delete a cookie immediately.
+        """
+        self.set_cookie(name, '__deleted__', expires=0)
+
+    def set_cookie(self, name, value, max_age=None, expires=None, path='/', domain=None, secure=False,
+                   http_only=True):
+        """
+        Set a cookie.
+
+        :param name: the cookie name.
+        :param value: the cookie value.
+        :param max_age: optional, seconds of cookie's max age.
+        :param expires: optional, unix timestamp, datetime or date object that indicate an absolute time of the
+                        expiration time of cookie. Note that if expires specified, the max_age will be ignored.
+        :param path: the cookie path, default to '/'.
+        :param domain: the cookie domain, default to None.
+        :param secure: if the cookie secure, default to False.
+        :param http_only: if the cookie is for http only, default to True for better safety.
+                          (client-side script cannot access cookies with HttpOnly flag).
+
+        >>> r = Response()
+        >>> r.set_cookie('company', 'Abc, Inc.', max_age=3600)
+        >>> r._cookies
+        {'company': 'company=Abc%2C%20Inc.; Max-Age=3600; Path=/; HttpOnly'}
+        >>> r.set_cookie('company', r'Example="Limited"', expires=1342274794.123, path='/sub/')
+        >>> r._cookies
+        {'company': 'company=Example%3D%22Limited%22; Expires=Sat, 14-Jul-2012 14:06:34 GMT; Path=/sub/; HttpOnly'}
+        >>> dt = datetime.datetime(2012, 7, 14, 22, 6, 34, tzinfo=UTC('+8:00'))
+        >>> r.set_cookie('company', 'Expires', expires=dt)
+        >>> r._cookies
+        {'company': 'company=Expires; Expires=Sat, 14-Jul-2012 14:06:34 GMT; Path=/; HttpOnly'}
+        """
+        if not hasattr(self, '_cookies'):
+            self._cookies = dict()
+        cookie_list = ['%s=%s' % (_quote(name), _quote(value))]
+        if isinstance(max_age, (int, long)):
+            cookie_list.append('Max-Age=%d' % max_age)
+        if expires is not None:
+            time_str = ''
+            if isinstance(expires, (int, float, long)):
+                time_str = datetime.datetime.fromtimestamp(expires, _UTC_0).strftime('%a, %d-%b-%Y %H:%M:%S GMT')
+            if isinstance(expires, (datetime.date, datetime.datetime)):
+                time_str = expires.astimezone(_UTC_0).strftime('%a, %d-%b-%Y %H:%M:%S GMT')
+            cookie_list.append('Expires=%s' % time_str)
+        cookie_list.append('Path=%s' % path)
+        if domain:
+            cookie_list.append('Domain=%s' % domain)
+        if secure:
+            cookie_list.append('Secure')
+        if http_only:
+            cookie_list.append('HttpOnly')
+        self._cookies[name] = '; '.join(cookie_list)
+
+    def del_cookie(self, name):
+        """
+        Delete a cookie.
+        >>> r = Response()
+        >>> r.set_cookie('company', 'Abc, Inc.', max_age=3600)
+        >>> r._cookies
+        {'company': 'company=Abc%2C%20Inc.; Max-Age=3600; Path=/; HttpOnly'}
+        >>> r.del_cookie('company')
+        >>> r._cookies
+        {}
+        """
+        if hasattr(self, '_cookies'):
+            if name in self._cookies:
+                del self._cookies[name]
+
+    @property
+    def status_code(self):
+        """
+        Get response status code as int.
+
+        >>> r = Response()
+        >>> r.status_code
+        200
+        >>> r.status = 404
+        >>> r.status_code
+        404
+        >>> r.status = '500 Internal Error'
+        >>> r.status_code
+        500
+        """
+        return int(self._status[:3])
 
     @property
     def status(self):
-        pass
+        """
+        Get response status. Default to '200 OK'.
+        >>> r = Response()
+        >>> r.status
+        '200 OK'
+        >>> r.status = 404
+        >>> r.status
+        '404 Not Found'
+        >>> r.status = '500 Oh My God'
+        >>> r.status
+        '500 Oh My God'
+        """
+        return self._status
 
     @ status.setter
     def status(self, value):
-        pass
+        """
+        Set response status as int or str.
 
-    # http get
-    def get(self, path):
-        pass
+        >>> r = Response()
+        >>> r.status = 404
+        >>> r.status
+        '404 Not Found'
+        >>> r.status = '500 ERR'
+        >>> r.status
+        '500 ERR'
+        >>> r.status = u'403 Denied'
+        >>> r.status
+        '403 Denied'
+        >>> r.status = 99
+        Traceback (most recent call last):
+          ...
+        ValueError: Bad response code: 99
+        >>> r.status = 'ok'
+        Traceback (most recent call last):
+          ...
+        ValueError: Bad response code: ok
+        >>> r.status = [1, 2, 3]
+        Traceback (most recent call last):
+          ...
+        TypeError: Bad type of response code.
+        """
+        if isinstance(value, (long, int)):
+            if 100 <= value <= 900:
+                status = _RESPONSE_STATUSES.get(value, '')
+                if status:
+                    self._status = '%d %s' % (value, status)
+                else:
+                    self._status = str(value)
+            else:
+                raise ValueError('Bad response code: %d' % value)
+        elif isinstance(value, basestring):
+            if isinstance(value, unicode):
+                value = value.encode('utf-8')
+            if _RE_RESPONSE_STATUS.match(value):
+                self._status = value
+            else:
+                raise ValueError('Bad response code: %d' % value)
+        else:
+            raise TypeError('Bad type of response code.')
 
-    # http post
-    def post(self, path):
-        pass
 
-    # http model
-    def view(self, path):
-        pass
+class Template(object):
+    def __init__(self, template_name, **kwargs):
+        """
+        Init a template object with template name, model as dict, and additional kw that will append to model.
 
-    def interceptor(self):
-        pass
+        >>> t = Template('hello.html', title='Hello', copyright='@2012')
+        >>> t.model['title']
+        'Hello'
+        >>> t.model['copyright']
+        '@2012'
+        >>> t = Template('test.html', abc=u'ABC', xyz=u'XYZ')
+        >>> t.model['abc']
+        u'ABC'
+        """
+        self.template_name = template_name
+        self.model = dict(**kwargs)
 
 
 class TemplateEngine(object):
-    def __call__(self, *args, **kwargs):
-        pass
+    """
+    Base Template Engine
+    """
+    @abstractmethod
+    def __call__(self, path, model):
+        return '<!-- override this method to render template -->'
 
 
 class Jinja2TemplateEngine(TemplateEngine):
     def __init__(self, tmp_dir, **kwargs):
         from jinja2 import Environment, FileSystemLoader
-        self._env = Environment(loader=FileSystemLoader(tmp_dir), **kwargs)
+        if 'auto_escape' not in kwargs:
+            kwargs['auto_escape'] = True
+        self._environ = Environment(loader=FileSystemLoader(tmp_dir), **kwargs)
+
+    def add_filter(self, name, fn_filter):
+        self._environ.filters[name] = fn_filter
 
     def __call__(self, path, model):
-        return self._env.get_template(path).render(**model).encode('utf-8')
+        return self._environ.get_template(path).render(**model).encode('utf-8')
 
 
 class WSGIApplication(object):
     def __init__(self, document_root=None, **kwargs):
-        pass
+        self._running = False
 
     # add an url define
     def add_url(self, func):

@@ -3,6 +3,7 @@ __author__ = 'guti'
 
 
 import os
+import sys
 import threading
 import datetime
 import re
@@ -12,11 +13,17 @@ import mimetypes
 import cgi
 import logging
 import functools
+import types
+import traceback
 
 from abc import abstractmethod
 from copy import deepcopy
 from db import Dict
 
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
 
 # letters and digits
 _LETTERS_DIGITS = string.letters + string.digits
@@ -449,8 +456,6 @@ def view(path):
             raise ValueError('Expect return a dict when using @view() decorator.')
         return _wrapper
     return _decorator
-
-
 
 
 def _build_pattern_fn(pattern):
@@ -1376,10 +1381,19 @@ class TemplateEngine(object):
 
 
 class Jinja2TemplateEngine(TemplateEngine):
+    """
+    Render using jinja2 template engine.
+
+    >>> temp_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'test')
+    >>> engine = Jinja2TemplateEngine(temp_path)
+    >>> engine.add_filter('datetime', lambda dt: dt.strftime('%Y-%m-%d %H:%M:%S'))
+    >>> engine('jinja2-test.html', dict(name='Michael', posted_at=datetime.datetime(2014, 6, 1, 10, 11, 12)))
+    '<p>Hello, Michael.</p><span>2014-06-01 10:11:12</span>'
+    """
     def __init__(self, tmp_dir, **kwargs):
         from jinja2 import Environment, FileSystemLoader
-        if 'auto_escape' not in kwargs:
-            kwargs['auto_escape'] = True
+        if 'autoescape' not in kwargs:
+            kwargs['autoescape'] = True
         self._environ = Environment(loader=FileSystemLoader(tmp_dir), **kwargs)
 
     def add_filter(self, name, fn_filter):
@@ -1392,35 +1406,140 @@ class Jinja2TemplateEngine(TemplateEngine):
 class WSGIApplication(object):
     def __init__(self, document_root=None, **kwargs):
         self._running = False
+        self._document_root = document_root
+        self._interceptors = list()
+        self._template_engine = None
+        self._get_static = dict()
+        self._post_static = dict()
+        self._get_dynamic = list()
+        self._post_dynamic = list()
 
-    # add an url define
-    def add_url(self, func):
-        pass
-
-    def add_interceptor(self, func):
-        pass
+    def _assert_not_running(self):
+        if self._running:
+            raise RuntimeError('Cannot modify WSGIApplication when running.')
 
     @property
     def template_engine(self):
-        pass
+        return self._template_engine
 
     @template_engine.setter
     def template_engine(self, engine):
-        pass
+        self._assert_not_running()
+        self._template_engine = engine
 
-    def get_wsgi_application(self):
-        def wsgi(env, start_respone):
-            pass
-        return wsgi
+    def add_module(self, module):
+        self._assert_not_running()
+        m = module if isinstance(module, types.ModuleType) else _load_module(module)
+        logging.info('Add module: %s' % m.__name__)
+        for name in dir(m):
+            fn = getattr(m, name)
+            if callable(fn) and hasattr(fn, '__web_route__') and hasattr(fn, '__web_method__'):
+                self.add_url(fn)
 
-    # when in the develop mode, it will restart the server.
-    def run(self, host='127.0.0.1', port=9000):
+    def add_url(self, func):
+        self._assert_not_running()
+        route = Route(func)
+        if not route.is_static:
+            if route.method == 'GET':
+                self._get_static[route.path] = route
+            if route.method == 'POST':
+                self._post_static[route.path] = route
+        else:
+            if route.method == 'GET':
+                self._get_dynamic.append(route)
+            if route.method == 'POST':
+                self._post_dynamic.append(route)
+        logging.info('Add route: %s' % str(route))
+
+    def add_interceptor(self, func):
+        self._assert_not_running()
+        self._interceptors.append(func)
+        logging.info('Add interceptor: %s' % str(func))
+
+    def run(self, port=9000, host='127.0.0.1', debug=True):
         from wsgiref.simple_server import make_server
-        server = make_server(host, port, self.get_wsgi_application())
-        server.serve_forever()
+        logging.info('application (%s) will start at %s:%s...' % (self._document_root, host, port))
+        sever = make_server(host, port, self.get_wsgi_application(debug=debug))
+        sever.serve_forever()
+
+    def get_wsgi_application(self, debug=False):
+        self._assert_not_running()
+        if debug:
+            self._get_dynamic.append(StaticFileRoute)
+        self._running = True
+
+        _application = Dict(document_root=self._document_root)
+
+        def fn_route():
+            request_method = context.request.request_method
+            path_info = context.request.path_info
+            if request_method == 'GET':
+                fn = self._get_static.get(path_info, None)
+                if fn:
+                    return fn()
+                for fn in self._get_dynamic:
+                    args = fn.match(path_info)
+                    if args:
+                        return fn(*args)
+                raise not_found()
+            if request_method == 'POST':
+                fn = self._post_static.get(path_info, None)
+                if fn:
+                    return fn()
+                for fn in self._post_dynamic:
+                    args = fn.match(path_info)
+                    if args:
+                        return fn(*args)
+                raise not_found()
+            raise bad_request()
+
+        fn_exec = _build_interceptor_chain(fn_route, *self._interceptors)
+
+        def wsgi(env, start_response):
+            context.application = _application
+            context.request = Request(env)
+            response = context.response = Response()
+            try:
+                r = fn_exec()
+                if isinstance(r, Template):
+                    r = self._template_engine(r.template_name, r.model)
+                if isinstance(r, unicode):
+                    r = r.encode('utf-8')
+                if r is None:
+                    r = list()
+                start_response(response.status, response.headers)
+                return r
+            except RedirectError, e:
+                response.set_header('Location', e.location)
+                start_response(e.status, response.headers)
+                return list()
+            except HttpError, e:
+                start_response(e.status, response.headers)
+                return ['<html><body><h1>', e.status, '</h1></body></html>']
+            except Exception, e:
+                logging.exception(e)
+                if not debug:
+                    start_response('500 Internal Server Error', [])
+                    return ['<html><body><h1>500 Internal Server Error</h1></body></html>']
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                fp = StringIO()
+                traceback.print_exception(exc_type, exc_value, exc_traceback, file=fp)
+                stacks = fp.getvalue()
+                fp.close()
+                start_response('500 Internal Server Error', [])
+                return [
+                    r'''<html><body><h1>500 Internal Server Error</h1>
+                    <div style="font-family:Monaco, Menlo, Consolas, 'Courier New', monospace;"><pre>''',
+                    stacks.replace('<', '&lt;').replace('>', '&gt;'), '</pre></div></body></html>']
+            finally:
+                del context.application
+                del context.request
+                del context.response
+        return wsgi
 
 
 if __name__ == '__main__':
+    sys.path.append('.')
     logging.basicConfig(level=logging.DEBUG)
     import doctest
     doctest.testmod()

@@ -1439,7 +1439,7 @@ class WSGIApplication(object):
     def add_url(self, func):
         self._assert_not_running()
         route = Route(func)
-        if not route.is_static:
+        if route.is_static:
             if route.method == 'GET':
                 self._get_static[route.path] = route
             if route.method == 'POST':

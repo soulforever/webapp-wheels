@@ -8,7 +8,7 @@ Override the default configuration.
 configs = {
     'db': {
         # TODO: should be modified to your own password
-        'user': 'you-own-user',
+        'user': 'your-own-usr',
         'password': 'your-own-pw',
         'database': 'wheels'
     }

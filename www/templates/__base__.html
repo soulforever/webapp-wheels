@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html class="uk-notouch" dir="ltr" lang="en-gb">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% block meta %} {% endblock %}
+    <title>{% block title %}?{% endblock%} - Wheels</title>
+    <link rel="stylesheet" href="/static/css/uikit.min.css">
+    <link rel="stylesheet" href="/static/css/uikit.gradient.css">
+    <link rel="stylesheet" href="/static/css/wheels.css">
+    <script src="/static/js/uikit.min.js"></script>
+    <script src="//upcdn.b0.upaiyun.com/libs/jquery/jquery-2.0.3.min.js"></script>
+    {% block before_head %} {% endblock %}
+</head>
+<body class="tm-background">
+    <div class="uk-container uk-container-center uk-margin-top uk-margin-large-bottom">
+        <!--nav-->
+        <nav class="tm-navbar uk-navbar uk-margin-large-bottom">
+            <a class="uk-navbar-brand uk-hidden-small" href="/">Wheels</a>
+            <ul class="uk-navbar-nav uk-hidden-small">
+                <li class="uk-active"><a href="/">Blog</a></li>
+                <li><a target="_blank" href="https://github.com/soulforever/webapp-wheels">Code</a></li>
+            </ul>
+            <div class="uk-navbar-flip">
+                <ul class="uk-navbar-nav">
+                    {% if user %}
+                        <li><a href="#0"><i class="uk-icon-user"></i>{{ user.name }}</a></li>
+                        <li><a href="/signout"><i class="uk-icon-sign-out"></i>Logout</a></li>
+                    {% else %}
+                        <li><a href="/signin"><i class="uk-icon-sign-in"></i>Login</a></li>
+                        <li><a href="/register"><i class="uk-icon-edit"></i>Register</a></li>
+                    {% endif %}
+                </ul>
+            </div>
+        </nav>
+        <!--article-->
+        <div class="tm-middle">
+            <div class="uk-container uk-container-center">
+                <div class="uk-grid" data-uk-grid-margin>
+                    {% block content %}
+                    {% endblock %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!--footer-->
+    <div class="uk-margin-large-top" style="background-color:#eee; border-top:1px solid #ccc;">
+        <div class="uk-container uk-container-center uk-text-center">
+            <div class="uk-panel uk-margin-top uk-margin-bottom">
+            <p>
+                <a target="_blank" href="https://soulforever.github.io" class="uk-icon-button uk-icon-info"></a>
+                <a target="_blank" href="https://github.com/soulforever" class="uk-icon-button uk-icon-github"></a>
+            </p>
+            <p>Powered by Wheels. Copyright &copy; 2016. All right reserved.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

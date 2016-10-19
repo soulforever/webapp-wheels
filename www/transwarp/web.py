@@ -725,13 +725,13 @@ class StaticFileRoute(object):
         self.route = re.compile('^/static/(.+)$')
 
     def match(self, url):
-        if url.startwith('/static/'):
-            return url[1:]
+        if url.startswith('/static/'):
+            return tuple((url[1:], ))
         return None
 
     def __call__(self, *args):
         file_path = os.path.join(context.application.document_root, args[0])
-        if not os.path.isdir(file_path):
+        if not os.path.isfile(file_path):
             raise not_found()
         file_ext = os.path.splitext(file_path)[1]
         context.response.content_type = mimetypes.types_map.get(file_ext, 'application/octet-stream')
@@ -1465,7 +1465,7 @@ class WSGIApplication(object):
     def get_wsgi_application(self, debug=False):
         self._assert_not_running()
         if debug:
-            self._get_dynamic.append(StaticFileRoute)
+            self._get_dynamic.append(StaticFileRoute())
         self._running = True
 
         _application = Dict(document_root=self._document_root)

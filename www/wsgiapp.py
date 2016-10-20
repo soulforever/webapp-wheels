@@ -46,6 +46,6 @@ wsgi_app.template_engine = template_engine
 wsgi_app.add_module(urls)
 
 if __name__ == '__main__':
-    wsgi_app.run(9000)
+    wsgi_app.run(9000, host='0.0.0.0')
 else:
     application = wsgi_app.get_wsgi_application()

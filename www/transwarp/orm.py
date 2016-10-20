@@ -113,7 +113,7 @@ class Model(dict):
     >>> r = u.insert()
     >>> u.find_first('id=10190').password
     u'******'
-    >>> TestUser.find_by("name='Michael'")[0]['email']
+    >>> TestUser.find_by("where name='Michael'")[0]['email']
     u'orm@db.org'
     >>> print TestUser.__mappings__['id']
     <IntegerField: id, bigint, default(0), I>
@@ -124,7 +124,7 @@ class Model(dict):
     >>> u.last_modified > (time.time() - 2)
     True
     >>> f = TestUser.get(10190)
-    >>> f.count_by("name=%s and password=%s", 'Michael', '******')
+    >>> f.count_by("where name=%s and password=%s", 'Michael', '******')
     1L
     >>> f.name
     u'Michael'
@@ -199,7 +199,7 @@ class Model(dict):
         """
         Find by where clause and return list.
         """
-        result = db.select('select * from %s where %s' % (cls.__table__, where), *args)
+        result = db.select('select * from %s %s' % (cls.__table__, where), *args)
         return [cls(**r) for r in result]
 
     @classmethod
@@ -214,7 +214,7 @@ class Model(dict):
         """
         Find by 'select count(pk) from table where ... ' and return int.
         """
-        return db.select_int('select count(%s) from %s where %s' %
+        return db.select_int('select count(%s) from %s %s' %
                              (cls.__primary_key__.name, cls.__table__, where), *args)
 
     def update(self):
